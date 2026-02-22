@@ -18,16 +18,14 @@ dp = Dispatcher()
 def setup_db():
     db = sqlite3.connect("kino_pro.db")
     cursor = db.cursor()
-    # Jadvallarni yaratish
-    cursor.execute("CREATE TABLE IF NOT EXISTS kinolar (kod TEXT UNIQUE, file_id TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS kinolar (kod TEXT UNIQUE, file_id TEXT, caption TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS channels (id TEXT UNIQUE, link TEXT, name TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER UNIQUE)")
     
-    # "Aqlli" qism: Agar caption ustuni bo'lmasa, uni qo'shadi
+    # Caption ustuni mavjudligini tekshirish (OperationalError oldini olish)
     try:
         cursor.execute("ALTER TABLE kinolar ADD COLUMN caption TEXT")
     except sqlite3.OperationalError:
-        # Ustun allaqachon mavjud bo'lsa, xatoni o'tkazib yuboradi
         pass
     
     db.commit()
@@ -43,7 +41,8 @@ async def check_subscription(user_id):
             member = await bot.get_chat_member(chat_id=ch[0], user_id=user_id)
             if member.status in ['left', 'kicked']:
                 return False
-        except Exception:
+        except Exception as e:
+            logging.error(f"Obuna tekshirishda xato: {e}")
             continue 
     return True
 
@@ -62,12 +61,12 @@ async def auto_save_movie(message: Message):
                 db.commit()
                 await bot.send_message(ADMIN_ID, f"✅ Yangi kino bazaga qo'shildi!\n🔢 Kod: {kino_kodi}")
             except Exception as e:
-                logging.error(f"Xato: {e}")
+                logging.error(f"Saqlashda xato: {e}")
 
 # --- START KOMANDASI ---
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
-    cursor.execute("INSERT OR IGNORE INTO users VALUES (?)", (message.from_user.id,))
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
     db.commit()
     
     if await check_subscription(message.from_user.id):
@@ -112,19 +111,15 @@ async def add_channel(message: Message):
     else:
         await message.answer("❌ Format: /add_channel ID link Nomi")
 
-@dp.callback_query(F.data.startswith("del_"), F.from_user.id == ADMIN_ID)
-async def inline_delete(call: CallbackQuery):
-    kod = call.data.replace("del_", "")
-    cursor.execute("DELETE FROM kinolar WHERE kod=?", (kod,))
-    db.commit()
-    await call.message.delete()
-    await call.answer("🗑 Kino o'chirildi!", show_alert=True)
-
 # --- KINO QIDIRISH ---
 @dp.message(F.text)
 async def search_movie(message: Message):
     if message.text.startswith('/'): return
     
+    # Statistika uchun foydalanuvchini bazaga qo'shish
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
+    db.commit()
+
     if await check_subscription(message.from_user.id):
         cursor.execute("SELECT file_id, caption FROM kinolar WHERE kod=?", (message.text.strip(),))
         res = cursor.fetchone()
@@ -135,10 +130,13 @@ async def search_movie(message: Message):
             kb = None
             if message.from_user.id == ADMIN_ID:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🗑 O'chirish (Admin)", callback_data=f"del_{message.text}")]
+                    [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"del_{message.text}")]
                 ])
             
-            await bot.send_video(message.chat.id, f_id, caption=caption_text, reply_markup=kb, parse_mode="Markdown")
+            try:
+                await bot.send_video(message.chat.id, f_id, caption=caption_text, reply_markup=kb, parse_mode="Markdown")
+            except Exception:
+                await bot.send_video(message.chat.id, f_id, caption=caption_text, reply_markup=kb)
         else:
             await message.answer("😔 Kechirasiz, bu kod bilan kino topilmadi.")
     else:
@@ -150,5 +148,5 @@ async def main():
 if __name__ == '__main__':
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
